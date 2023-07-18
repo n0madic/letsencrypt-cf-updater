@@ -148,6 +148,7 @@ func main() {
 		// Check if domains match
 		if len(args.Domain) > 0 && !reflect.DeepEqual(domains, args.Domain) {
 			renew = true
+			domains = args.Domain
 		}
 		// Renew the certificate if necessary
 		if time.Until(certResource.NotAfter) < time.Duration(args.Expire)*24*time.Hour {

@@ -13,9 +13,8 @@ RUN go install -ldflags="-s -w"
 
 FROM alpine:latest
 
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+RUN apk add --quite --no-cache ca-certificates git
+
 COPY --from=builder /go/bin/* /bin/
 
 WORKDIR /certs
-
-ENTRYPOINT ["/bin/letsencrypt-cf-updater"]

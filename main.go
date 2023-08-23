@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -91,13 +90,13 @@ func main() {
 		if err != nil {
 			log.Fatalf("Could not marshal user: %v", err)
 		}
-		err = ioutil.WriteFile(accountPath, data, 0600)
+		err = os.WriteFile(accountPath, data, 0600)
 		if err != nil {
 			log.Fatalf("Could not save user: %v", err)
 		}
 	} else if err == nil {
 		// Load user
-		data, err := ioutil.ReadFile(accountPath)
+		data, err := os.ReadFile(accountPath)
 		if err != nil {
 			log.Fatalf("Could not read user: %v", err)
 		}
@@ -134,7 +133,7 @@ func main() {
 	// if certificate exists, check if it needs to be renewed
 	if err == nil {
 		// Load the certificate
-		data, err := ioutil.ReadFile(certPath)
+		data, err := os.ReadFile(certPath)
 		if err != nil {
 			log.Fatalf("Could not read certificate: %v", err)
 		}
@@ -177,7 +176,7 @@ func main() {
 		}
 
 		// Save the certificate
-		err = ioutil.WriteFile(certPath, certResource.Certificate, 0600)
+		err = os.WriteFile(certPath, certResource.Certificate, 0600)
 		if err != nil {
 			log.Fatalf("Could not save certificate: %v", err)
 		}
@@ -216,7 +215,7 @@ func createPrivateKey(path string) (*rsa.PrivateKey, error) {
 }
 
 func loadPrivateKey(path string) (*rsa.PrivateKey, error) {
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}

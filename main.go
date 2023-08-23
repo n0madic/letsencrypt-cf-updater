@@ -10,7 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
+	"sort"
 	"time"
 
 	"github.com/alexflint/go-arg"
@@ -145,7 +145,7 @@ func main() {
 		// Extract domains from certificate
 		domains = certcrypto.ExtractDomains(certResource)
 		// Check if domains match
-		if len(args.Domain) > 0 && !reflect.DeepEqual(domains, args.Domain) {
+		if len(args.Domain) > 0 && !slicesEqual(domains, args.Domain) {
 			renew = true
 			domains = args.Domain
 			log.Infof("Domains do not match, renewal is necessary")
@@ -228,4 +228,18 @@ func loadPrivateKey(path string) (*rsa.PrivateKey, error) {
 	}
 
 	return x509.ParsePKCS1PrivateKey(block.Bytes)
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	sort.Strings(a)
+	sort.Strings(b)
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+	return true
 }

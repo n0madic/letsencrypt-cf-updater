@@ -1,10 +1,49 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// Account files written by lego v4 must keep working after the v5 upgrade:
+// losing the account URL would make every subsequent request unauthenticated.
+func TestMigrateLegacyAccount(t *testing.T) {
+	data := []byte(`{
+		"email": "user@example.com",
+		"registration": {
+			"body": {"status": "valid", "contact": ["mailto:user@example.com"]},
+			"uri": "https://acme-v02.api.letsencrypt.org/acme/acct/123"
+		}
+	}`)
+
+	var account Account
+	if err := json.Unmarshal(data, &account); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if account.Registration != nil && account.Registration.Location != "" {
+		t.Fatal("legacy file unexpectedly parsed as the current format")
+	}
+
+	if err := migrateLegacyAccount(data, &account); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	if got := account.Registration.Location; got != "https://acme-v02.api.letsencrypt.org/acme/acct/123" {
+		t.Errorf("Location = %q, want the URI from the legacy file", got)
+	}
+	if got := account.Registration.Status; got != "valid" {
+		t.Errorf("Status = %q, want %q", got, "valid")
+	}
+}
+
+func TestMigrateLegacyAccountWithoutRegistration(t *testing.T) {
+	var account Account
+	if err := migrateLegacyAccount([]byte(`{"email": "user@example.com"}`), &account); err == nil {
+		t.Error("expected an error for an account file without a registration URL")
+	}
+}
 
 func TestSlicesEqual(t *testing.T) {
 	tests := []struct {

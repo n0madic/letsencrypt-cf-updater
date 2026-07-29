@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -8,18 +9,20 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"time"
 
 	"github.com/alexflint/go-arg"
-	"github.com/go-acme/lego/v4/certcrypto"
-	"github.com/go-acme/lego/v4/certificate"
-	"github.com/go-acme/lego/v4/lego"
-	"github.com/go-acme/lego/v4/log"
-	"github.com/go-acme/lego/v4/providers/dns/cloudflare"
-	"github.com/go-acme/lego/v4/registration"
+	"github.com/go-acme/lego/v5/acme"
+	"github.com/go-acme/lego/v5/certcrypto"
+	"github.com/go-acme/lego/v5/certificate"
+	"github.com/go-acme/lego/v5/lego"
+	"github.com/go-acme/lego/v5/log"
+	"github.com/go-acme/lego/v5/providers/dns/cloudflare"
+	"github.com/go-acme/lego/v5/registration"
 )
 
 type args struct {
@@ -33,31 +36,43 @@ type args struct {
 }
 
 type Account struct {
-	Email        string                 `json:"email"`
-	Registration *registration.Resource `json:"registration"`
-	key          crypto.PrivateKey
+	Email        string                `json:"email"`
+	Registration *acme.ExtendedAccount `json:"registration"`
+	key          crypto.Signer
 }
 
 func (u *Account) GetEmail() string {
 	return u.Email
 }
 
-func (u Account) GetRegistration() *registration.Resource {
+func (u Account) GetRegistration() *acme.ExtendedAccount {
 	return u.Registration
 }
 
-func (u *Account) GetPrivateKey() crypto.PrivateKey {
+func (u *Account) GetPrivateKey() crypto.Signer {
 	return u.key
+}
+
+// legacyAccount is the account file layout written by lego v4, where the
+// registration was stored as {"body": ..., "uri": ...} instead of an
+// acme.ExtendedAccount.
+type legacyAccount struct {
+	Registration *struct {
+		Body acme.Account `json:"body"`
+		URI  string       `json:"uri"`
+	} `json:"registration"`
 }
 
 func main() {
 	var args args
 	arg.MustParse(&args)
 
+	ctx := context.Background()
+
 	// Create a user. New accounts need an email and private key to start
 	accountKey, err := loadOrCreatePrivateKey(filepath.Join(args.CertDir, "account.key"))
 	if err != nil {
-		log.Fatalf("Could not load or create private key: %v", err)
+		log.Fatal("Could not load or create private key", log.ErrorAttr(err))
 	}
 
 	account := Account{
@@ -66,7 +81,6 @@ func main() {
 	}
 
 	config := lego.NewConfig(&account)
-	config.Certificate.KeyType = certcrypto.RSA2048
 	if args.AcmeURL != "" {
 		config.CADirURL = args.AcmeURL
 	}
@@ -76,61 +90,68 @@ func main() {
 	if os.IsNotExist(err) {
 		client, err := lego.NewClient(config)
 		if err != nil {
-			log.Fatalf("Could not create ACME client for registration: %v", err)
+			log.Fatal("Could not create ACME client for registration", log.ErrorAttr(err))
 		}
 
 		// New users will need to register
-		reg, err := client.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
+		reg, err := client.Registration.Register(ctx, registration.RegisterOptions{TermsOfServiceAgreed: true})
 		if err != nil {
-			log.Fatalf("Could not register user: %v", err)
+			log.Fatal("Could not register user", log.ErrorAttr(err))
 		}
 		account.Registration = reg
 
 		// Save user
-		data, err := json.MarshalIndent(account, "", "\t")
-		if err != nil {
-			log.Fatalf("Could not marshal user: %v", err)
-		}
-		err = os.WriteFile(accountPath, data, 0600)
-		if err != nil {
-			log.Fatalf("Could not save user: %v", err)
+		if err := saveAccount(accountPath, &account); err != nil {
+			log.Fatal("Could not save user", log.ErrorAttr(err))
 		}
 	} else if err == nil {
 		// Load user
 		data, err := os.ReadFile(accountPath)
 		if err != nil {
-			log.Fatalf("Could not read user: %v", err)
+			log.Fatal("Could not read user", log.ErrorAttr(err))
 		}
 		err = json.Unmarshal(data, &account)
 		if err != nil {
-			log.Fatalf("Could not load user: %v", err)
+			log.Fatal("Could not load user", log.ErrorAttr(err))
+		}
+		// Account files written by lego v4 store the registration in a
+		// different layout, convert them instead of losing the account URL
+		if account.Registration == nil || account.Registration.Location == "" {
+			if err := migrateLegacyAccount(data, &account); err != nil {
+				log.Fatal("Could not migrate user", log.ErrorAttr(err))
+			}
+			if err := saveAccount(accountPath, &account); err != nil {
+				log.Fatal("Could not save migrated user", log.ErrorAttr(err))
+			}
+			log.Info("Account registration migrated to the current format")
 		}
 		// Command line arguments and environment variables take precedence
 		// over the values stored in the account file
 		if args.Email != "" && args.Email != account.Email {
-			log.Infof("Account email overridden: %q -> %q", account.Email, args.Email)
+			log.Info("Account email overridden",
+				slog.String("old", account.Email), slog.String("new", args.Email))
 			account.Email = args.Email
 		}
 		account.key = accountKey
 	} else {
-		log.Fatalf("Could not stat user config: %v", err)
+		log.Fatal("Could not stat user config", log.ErrorAttr(err))
 	}
 
 	// A client facilitates communication with the CA server.
 	client, err := lego.NewClient(config)
 	if err != nil {
-		log.Fatalf("Could not create ACME client: %v", err)
+		log.Fatal("Could not create ACME client", log.ErrorAttr(err))
 	}
 
 	// Enable DNS challenge provider
 	provider, err := cloudflare.NewDNSProvider()
 	if err != nil {
-		log.Fatalf("Could not create DNS provider: %v", err)
+		log.Fatal("Could not create DNS provider", log.ErrorAttr(err))
 	}
 	// Set DNS challenge provider
 	err = client.Challenge.SetDNS01Provider(provider)
 	if err != nil {
-		log.Fatalf("Could not set DNS challenge provider: %v", err)
+		log.Fatal("Could not set DNS challenge provider", log.ErrorAttr(err))
 	}
 
 	domains := args.Domain
@@ -138,7 +159,7 @@ func main() {
 	certPath := filepath.Join(args.CertDir, args.CertName+".crt")
 	_, err = os.Stat(certPath)
 	if err != nil && !os.IsNotExist(err) {
-		log.Fatalf("Could not stat certificate: %v", err)
+		log.Fatal("Could not stat certificate", log.ErrorAttr(err))
 	}
 	certExists := err == nil
 	// if certificate exists, check if it needs to be renewed
@@ -146,12 +167,12 @@ func main() {
 		// Load the certificate
 		data, err := os.ReadFile(certPath)
 		if err != nil {
-			log.Fatalf("Could not read certificate: %v", err)
+			log.Fatal("Could not read certificate", log.ErrorAttr(err))
 		}
 		// Parse the certificate
 		certResource, err := certcrypto.ParsePEMCertificate(data)
 		if err != nil {
-			log.Fatalf("Could not parse certificate: %v", err)
+			log.Fatal("Could not parse certificate", log.ErrorAttr(err))
 		}
 		// Extract domains from certificate
 		domains = certcrypto.ExtractDomains(certResource)
@@ -159,44 +180,72 @@ func main() {
 		if len(args.Domain) > 0 && !slicesEqual(domains, args.Domain) {
 			renew = true
 			domains = args.Domain
-			log.Infof("Domains do not match, renewal is necessary")
+			log.Info("Domains do not match, renewal is necessary", log.DomainsAttr(domains))
 		}
 		// Renew the certificate if necessary
 		if time.Until(certResource.NotAfter) < time.Duration(args.Expire)*24*time.Hour {
 			renew = true
-			log.Infof("Certificate will expire in %d days, renewal is necessary", int(time.Until(certResource.NotAfter).Hours()/24))
+			log.Info("Certificate is about to expire, renewal is necessary",
+				slog.Int("days", int(time.Until(certResource.NotAfter).Hours()/24)))
 		}
 	}
 	// Obtain or renew a certificate
 	if renew || !certExists {
 		if len(domains) == 0 {
-			log.Fatalf("No domains specified")
+			log.Fatal("No domains specified")
 		}
 		privateKey, err := loadOrCreatePrivateKey(filepath.Join(args.CertDir, args.CertName+".key"))
 		if err != nil {
-			log.Fatalf("Could not load or create private key: %v", err)
+			log.Fatal("Could not load or create private key", log.ErrorAttr(err))
 		}
 		// Obtain a certificate for the domain
 		request := certificate.ObtainRequest{
 			Domains:    domains,
 			Bundle:     args.Bundle,
 			PrivateKey: privateKey,
+			KeyType:    certcrypto.RSA2048,
 		}
 
-		certResource, err := client.Certificate.Obtain(request)
+		certResource, err := client.Certificate.Obtain(ctx, request)
 		if err != nil {
-			log.Fatalf("Could not obtain certificate: %v", err)
+			log.Fatal("Could not obtain certificate", log.ErrorAttr(err))
 		}
 
 		// Save the certificate
 		err = os.WriteFile(certPath, certResource.Certificate, 0600)
 		if err != nil {
-			log.Fatalf("Could not save certificate: %v", err)
+			log.Fatal("Could not save certificate", log.ErrorAttr(err))
 		}
-		log.Infof("Certificate obtained for %s and saved to %s", domains, certPath)
+		log.Info("Certificate obtained", log.DomainsAttr(domains), slog.String("path", certPath))
 	} else {
-		log.Infof("Certificate for %s is still valid", domains)
+		log.Info("Certificate is still valid", log.DomainsAttr(domains))
 	}
+}
+
+func saveAccount(path string, account *Account) error {
+	data, err := json.MarshalIndent(account, "", "\t")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, data, 0600)
+}
+
+func migrateLegacyAccount(data []byte, account *Account) error {
+	var legacy legacyAccount
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+	if legacy.Registration == nil || legacy.Registration.URI == "" {
+		return errors.New("account file has no registration URL")
+	}
+
+	account.Registration = &acme.ExtendedAccount{
+		Account:  legacy.Registration.Body,
+		Location: legacy.Registration.URI,
+	}
+
+	return nil
 }
 
 func loadOrCreatePrivateKey(path string) (*rsa.PrivateKey, error) {
@@ -243,7 +292,7 @@ func loadPrivateKey(path string) (*rsa.PrivateKey, error) {
 
 // slicesEqual reports whether both slices contain the same set of strings,
 // regardless of order. The arguments are left untouched: the caller relies on
-// the original order, because the first domain becomes the certificate CN.
+// the original order of the domains.
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

@@ -3,12 +3,12 @@ module github.com/n0madic/letsencrypt-cf-updater
 go 1.25.0
 
 require (
-	github.com/alexflint/go-arg v1.4.3
+	github.com/alexflint/go-arg v1.6.1
 	github.com/go-acme/lego/v5 v5.3.1
 )
 
 require (
-	github.com/alexflint/go-scalar v1.1.0 // indirect
+	github.com/alexflint/go-scalar v1.2.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/miekg/dns v1.1.72 // indirect

@@ -11,7 +11,7 @@ go install github.com/n0madic/letsencrypt-cf-updater@latest
 Or run docker image:
 
 ```
-docker run --rm -it -v /path/to/certs:/certs -e CLOUDFLARE_DNS_API_TOKEN n0madic/letsencrypt-cf-updater
+docker run --rm -it -v /path/to/certs:/certs -e CLOUDFLARE_DNS_API_TOKEN ghcr.io/n0madic/letsencrypt-cf-updater:master
 ```
 
 ## Usage

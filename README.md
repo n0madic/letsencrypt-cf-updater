@@ -19,11 +19,12 @@ docker run --rm -it -v /path/to/certs:/certs -e CLOUDFLARE_DNS_API_TOKEN n0madic
 Set Cloudflare API credentials to `CLOUDFLARE_EMAIL`, `CLOUDFLARE_API_KEY` or `CLOUDFLARE_DNS_API_TOKEN` or `CLOUDFLARE_ZONE_API_TOKEN` environment variables.
 
 ```
-Usage: letsencrypt-cf-updater [--acmeurl URL] [--certdir PATH] [--certname NAME] [--domain DOMAIN] [--email EMAIL] [--expire DAYS]
+Usage: letsencrypt-cf-updater [--acmeurl URL] [--bundle] [--certdir PATH] [--certname NAME] [--domain DOMAIN] [--email EMAIL] [--expire DAYS]
 
 Options:
   --acmeurl URL, -u URL
                          ACME directory URL [env: ACME_URL]
+  --bundle, -b           Append the issuer certificate chain to the certificate [env: ACME_CERT_BUNDLE]
   --certdir PATH, -D PATH
                          Directory to store the certificate [env: ACME_CERT_DIR]
   --certname NAME, -n NAME

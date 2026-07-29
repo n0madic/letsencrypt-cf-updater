@@ -13,7 +13,7 @@ RUN go install -ldflags="-s -w"
 
 FROM alpine:latest
 
-RUN apk add --quite --no-cache ca-certificates git
+RUN apk add --quiet --no-cache ca-certificates git
 
 COPY --from=builder /go/bin/* /bin/
 

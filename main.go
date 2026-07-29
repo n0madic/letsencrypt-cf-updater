@@ -24,6 +24,7 @@ import (
 
 type args struct {
 	AcmeURL  string   `arg:"-u,env:ACME_URL" placeholder:"URL" help:"ACME directory URL"`
+	Bundle   bool     `arg:"-b,env:ACME_CERT_BUNDLE" help:"Append the issuer certificate chain to the certificate"`
 	CertDir  string   `arg:"-D,env:ACME_CERT_DIR" placeholder:"PATH" help:"Directory to store the certificate"`
 	CertName string   `arg:"-n,env:ACME_CERT_NAME" placeholder:"NAME" help:"Certificate name" default:"cert"`
 	Domain   []string `arg:"-d,env:ACME_DOMAINS_REQUEST,separate" help:"List of domains. Multiple -d flags are allowed"`
@@ -104,6 +105,12 @@ func main() {
 		if err != nil {
 			log.Fatalf("Could not load user: %v", err)
 		}
+		// Command line arguments and environment variables take precedence
+		// over the values stored in the account file
+		if args.Email != "" && args.Email != account.Email {
+			log.Infof("Account email overridden: %q -> %q", account.Email, args.Email)
+			account.Email = args.Email
+		}
 		account.key = accountKey
 	} else {
 		log.Fatalf("Could not stat user config: %v", err)
@@ -130,8 +137,12 @@ func main() {
 	renew := false
 	certPath := filepath.Join(args.CertDir, args.CertName+".crt")
 	_, err = os.Stat(certPath)
+	if err != nil && !os.IsNotExist(err) {
+		log.Fatalf("Could not stat certificate: %v", err)
+	}
+	certExists := err == nil
 	// if certificate exists, check if it needs to be renewed
-	if err == nil {
+	if certExists {
 		// Load the certificate
 		data, err := os.ReadFile(certPath)
 		if err != nil {
@@ -157,7 +168,7 @@ func main() {
 		}
 	}
 	// Obtain or renew a certificate
-	if renew || os.IsNotExist(err) {
+	if renew || !certExists {
 		if len(domains) == 0 {
 			log.Fatalf("No domains specified")
 		}
@@ -168,7 +179,7 @@ func main() {
 		// Obtain a certificate for the domain
 		request := certificate.ObtainRequest{
 			Domains:    domains,
-			Bundle:     false,
+			Bundle:     args.Bundle,
 			PrivateKey: privateKey,
 		}
 
@@ -202,7 +213,7 @@ func createPrivateKey(path string) (*rsa.PrivateKey, error) {
 		return nil, err
 	}
 
-	file, err := os.Create(path)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -230,14 +241,19 @@ func loadPrivateKey(path string) (*rsa.PrivateKey, error) {
 	return x509.ParsePKCS1PrivateKey(block.Bytes)
 }
 
+// slicesEqual reports whether both slices contain the same set of strings,
+// regardless of order. The arguments are left untouched: the caller relies on
+// the original order, because the first domain becomes the certificate CN.
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	sort.Strings(a)
-	sort.Strings(b)
-	for i, v := range a {
-		if v != b[i] {
+	sortedA := append([]string(nil), a...)
+	sortedB := append([]string(nil), b...)
+	sort.Strings(sortedA)
+	sort.Strings(sortedB)
+	for i, v := range sortedA {
+		if v != sortedB[i] {
 			return false
 		}
 	}

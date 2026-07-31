@@ -86,14 +86,54 @@ func TestSlicesEqualDoesNotMutateArguments(t *testing.T) {
 	}
 }
 
-func TestCreatePrivateKeyPermissions(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cert.key")
+func TestValidateCertName(t *testing.T) {
+	tests := []struct {
+		name     string
+		certName string
+		wantErr  bool
+	}{
+		{"simple", "cert", false},
+		{"domain", "example.com", false},
+		{"repeated dots", "foo..bar", false},
+		{"empty", "", true},
+		{"current directory", ".", true},
+		{"parent directory", "..", true},
+		{"forward slash", "tenant/cert", true},
+		{"backslash", `tenant\cert`, true},
+	}
 
-	if _, err := createPrivateKey(path); err != nil {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateCertName(tt.certName)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateCertName(%q) error = %v, wantErr %v", tt.certName, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestNormalizeCertDir(t *testing.T) {
+	if got := normalizeCertDir(""); got != "." {
+		t.Errorf("normalizeCertDir(\"\") = %q, want %q", got, ".")
+	}
+	if got := normalizeCertDir("/certs"); got != "/certs" {
+		t.Errorf("normalizeCertDir(\"/certs\") = %q, want %q", got, "/certs")
+	}
+}
+
+func TestCreatePrivateKeyPermissions(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	defer root.Close()
+
+	if _, err := createPrivateKey(root, "cert.key"); err != nil {
 		t.Fatalf("createPrivateKey: %v", err)
 	}
 
-	info, err := os.Stat(path)
+	info, err := root.Stat("cert.key")
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
@@ -103,19 +143,76 @@ func TestCreatePrivateKeyPermissions(t *testing.T) {
 }
 
 func TestLoadOrCreatePrivateKeyRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "account.key")
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	defer root.Close()
 
-	created, err := loadOrCreatePrivateKey(path)
+	created, err := loadOrCreatePrivateKey(root, "account.key")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	loaded, err := loadOrCreatePrivateKey(path)
+	loaded, err := loadOrCreatePrivateKey(root, "account.key")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
 
 	if !created.Equal(loaded) {
 		t.Error("loaded key does not match the created one")
+	}
+}
+
+func TestRootRejectsSymlinkEscape(t *testing.T) {
+	parent := t.TempDir()
+	certDir := filepath.Join(parent, "certs")
+	if err := os.Mkdir(certDir, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	outside := filepath.Join(parent, "outside.crt")
+	link := filepath.Join(certDir, "cert.crt")
+	if err := os.Symlink(filepath.Join("..", "outside.crt"), link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	root, err := os.OpenRoot(certDir)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	defer root.Close()
+
+	if err := root.WriteFile("cert.crt", []byte("certificate"), 0600); err == nil {
+		t.Fatal("expected an error for a symlink escaping the certificate directory")
+	}
+	if _, err := os.Stat(outside); !os.IsNotExist(err) {
+		t.Fatalf("outside file was created or stat returned an unexpected error: %v", err)
+	}
+}
+
+func TestCreatePrivateKeyDoesNotTruncateExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cert.key")
+	const original = "existing file"
+	if err := os.WriteFile(path, []byte(original), 0644); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	defer root.Close()
+
+	if _, err := createPrivateKey(root, "cert.key"); err == nil {
+		t.Fatal("expected exclusive private-key creation to fail")
+	}
+	data, err := root.ReadFile("cert.key")
+	if err != nil {
+		t.Fatalf("read existing file: %v", err)
+	}
+	if string(data) != original {
+		t.Errorf("existing file was changed: got %q, want %q", data, original)
 	}
 }

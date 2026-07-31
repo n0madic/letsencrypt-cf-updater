@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/alexflint/go-arg"
@@ -67,10 +68,21 @@ func main() {
 	var args args
 	arg.MustParse(&args)
 
+	if err := validateCertName(args.CertName); err != nil {
+		log.Fatal("Invalid certificate name", log.ErrorAttr(err))
+	}
+
+	certDir := normalizeCertDir(args.CertDir)
+	certRoot, err := os.OpenRoot(certDir)
+	if err != nil {
+		log.Fatal("Could not open certificate directory", log.ErrorAttr(err))
+	}
+	defer certRoot.Close()
+
 	ctx := context.Background()
 
 	// Create a user. New accounts need an email and private key to start
-	accountKey, err := loadOrCreatePrivateKey(filepath.Join(args.CertDir, "account.key"))
+	accountKey, err := loadOrCreatePrivateKey(certRoot, "account.key")
 	if err != nil {
 		log.Fatal("Could not load or create private key", log.ErrorAttr(err))
 	}
@@ -85,8 +97,8 @@ func main() {
 		config.CADirURL = args.AcmeURL
 	}
 
-	accountPath := filepath.Join(args.CertDir, "account.json")
-	_, err = os.Stat(accountPath)
+	const accountPath = "account.json"
+	_, err = certRoot.Stat(accountPath)
 	if os.IsNotExist(err) {
 		client, err := lego.NewClient(config)
 		if err != nil {
@@ -101,12 +113,12 @@ func main() {
 		account.Registration = reg
 
 		// Save user
-		if err := saveAccount(accountPath, &account); err != nil {
+		if err := saveAccount(certRoot, accountPath, &account); err != nil {
 			log.Fatal("Could not save user", log.ErrorAttr(err))
 		}
 	} else if err == nil {
 		// Load user
-		data, err := os.ReadFile(accountPath)
+		data, err := certRoot.ReadFile(accountPath)
 		if err != nil {
 			log.Fatal("Could not read user", log.ErrorAttr(err))
 		}
@@ -120,7 +132,7 @@ func main() {
 			if err := migrateLegacyAccount(data, &account); err != nil {
 				log.Fatal("Could not migrate user", log.ErrorAttr(err))
 			}
-			if err := saveAccount(accountPath, &account); err != nil {
+			if err := saveAccount(certRoot, accountPath, &account); err != nil {
 				log.Fatal("Could not save migrated user", log.ErrorAttr(err))
 			}
 			log.Info("Account registration migrated to the current format")
@@ -156,8 +168,9 @@ func main() {
 
 	domains := args.Domain
 	renew := false
-	certPath := filepath.Join(args.CertDir, args.CertName+".crt")
-	_, err = os.Stat(certPath)
+	certName := args.CertName + ".crt"
+	certPath := filepath.Join(certDir, certName)
+	_, err = certRoot.Stat(certName)
 	if err != nil && !os.IsNotExist(err) {
 		log.Fatal("Could not stat certificate", log.ErrorAttr(err))
 	}
@@ -165,7 +178,7 @@ func main() {
 	// if certificate exists, check if it needs to be renewed
 	if certExists {
 		// Load the certificate
-		data, err := os.ReadFile(certPath)
+		data, err := certRoot.ReadFile(certName)
 		if err != nil {
 			log.Fatal("Could not read certificate", log.ErrorAttr(err))
 		}
@@ -194,7 +207,7 @@ func main() {
 		if len(domains) == 0 {
 			log.Fatal("No domains specified")
 		}
-		privateKey, err := loadOrCreatePrivateKey(filepath.Join(args.CertDir, args.CertName+".key"))
+		privateKey, err := loadOrCreatePrivateKey(certRoot, args.CertName+".key")
 		if err != nil {
 			log.Fatal("Could not load or create private key", log.ErrorAttr(err))
 		}
@@ -212,7 +225,7 @@ func main() {
 		}
 
 		// Save the certificate
-		err = os.WriteFile(certPath, certResource.Certificate, 0600)
+		err = certRoot.WriteFile(certName, certResource.Certificate, 0600)
 		if err != nil {
 			log.Fatal("Could not save certificate", log.ErrorAttr(err))
 		}
@@ -222,13 +235,33 @@ func main() {
 	}
 }
 
-func saveAccount(path string, account *Account) error {
+func validateCertName(name string) error {
+	switch {
+	case name == "":
+		return errors.New("certificate name must not be empty")
+	case name == "." || name == "..":
+		return errors.New("certificate name cannot be a dot path element")
+	case strings.ContainsAny(name, `/\`):
+		return errors.New("certificate name must not contain path separators")
+	default:
+		return nil
+	}
+}
+
+func normalizeCertDir(dir string) string {
+	if dir == "" {
+		return "."
+	}
+	return dir
+}
+
+func saveAccount(root *os.Root, path string, account *Account) error {
 	data, err := json.MarshalIndent(account, "", "\t")
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0600)
+	return root.WriteFile(path, data, 0600)
 }
 
 func migrateLegacyAccount(data []byte, account *Account) error {
@@ -248,21 +281,24 @@ func migrateLegacyAccount(data []byte, account *Account) error {
 	return nil
 }
 
-func loadOrCreatePrivateKey(path string) (*rsa.PrivateKey, error) {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return createPrivateKey(path)
+func loadOrCreatePrivateKey(root *os.Root, path string) (*rsa.PrivateKey, error) {
+	if _, err := root.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return createPrivateKey(root, path)
+		}
+		return nil, err
 	}
 
-	return loadPrivateKey(path)
+	return loadPrivateKey(root, path)
 }
 
-func createPrivateKey(path string) (*rsa.PrivateKey, error) {
+func createPrivateKey(root *os.Root, path string) (*rsa.PrivateKey, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, err
 	}
 
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	file, err := root.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -276,8 +312,8 @@ func createPrivateKey(path string) (*rsa.PrivateKey, error) {
 	return key, nil
 }
 
-func loadPrivateKey(path string) (*rsa.PrivateKey, error) {
-	data, err := os.ReadFile(path)
+func loadPrivateKey(root *os.Root, path string) (*rsa.PrivateKey, error) {
+	data, err := root.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
